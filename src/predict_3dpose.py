@@ -1,9 +1,11 @@
-"""Predicting 3d poses from 2d joints"""
+'''
+adapted module for predicting 3d poses from 2d joints.
+see the meaning of configurations in README.md
+'''
 
 import os
 import sys
 import time
-import copy
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,62 +16,54 @@ import data_utils
 import linear_model
 import procrustes
 import viz
+from config import config, load_config, NUM_CAMERAS
+from data_utils_mod import delete_depth_coordinate, store_results, set_test_folders, set_model_folder
+from collections import OrderedDict
+import copy
+import argparse
+import data_utils_mod
 
-tf.app.flags.DEFINE_float("learning_rate", 1e-3, "Learning rate")
-tf.app.flags.DEFINE_float("dropout", 1, "Dropout keep probability. 1 means no dropout")
-tf.app.flags.DEFINE_integer("batch_size", 64, "Batch size to use during training")
-tf.app.flags.DEFINE_integer("epochs", 200, "How many epochs we should train for")
-tf.app.flags.DEFINE_boolean("camera_frame", False, "Convert 3d poses to camera coordinates")
-tf.app.flags.DEFINE_boolean("max_norm", False, "Apply maxnorm constraint to the weights")
-tf.app.flags.DEFINE_boolean("batch_norm", False, "Use batch_normalization")
+FLAGS = None
+current_folder = os.path.dirname(__file__)
 
-# Data loading
-tf.app.flags.DEFINE_boolean("predict_14", False, "predict 14 joints")
-tf.app.flags.DEFINE_string("action","All", "The action to train on. 'All' means all the actions")
+def initialize_flags():    
+    tf.app.flags.DEFINE_float("learning_rate", 1e-3, "Learning rate")
+    tf.app.flags.DEFINE_float("dropout", 0.5, "Dropout keep probability. 1 means no dropout")
+    tf.app.flags.DEFINE_integer("batch_size", 64, "Batch size to use during training")
+    tf.app.flags.DEFINE_integer("epochs", 100, "How many epochs we should train for")
+    tf.app.flags.DEFINE_boolean("camera_frame", config.CAMERA_FRAME, "Convert 3d poses to camera coordinates")
+    tf.app.flags.DEFINE_boolean("max_norm", True, "Apply maxnorm constraint to the weights")
+    tf.app.flags.DEFINE_boolean("batch_norm", True, "Use batch_normalization")
+    
+    # Data loading
+    tf.app.flags.DEFINE_boolean("predict_14", False, "predict 14 joints")
+    tf.app.flags.DEFINE_string("action", config.ACTION, "The action to train on. 'All' means all the actions")
+    
+    # Architecture
+    tf.app.flags.DEFINE_integer("linear_size", 1024, "Size of each model layer.")
+    tf.app.flags.DEFINE_integer("num_layers", 2, "Number of layers in the model.")
+    tf.app.flags.DEFINE_boolean("residual", True, "Whether to add a residual connection every 2 layers")
+    
+    # Evaluation
+    tf.app.flags.DEFINE_boolean("procrustes", False, "Apply procrustes analysis at test time")
+    tf.app.flags.DEFINE_boolean("evaluateActionWise", True, "The dataset to use either h36m or heva")
+    
+    # Directories
+    tf.app.flags.DEFINE_string("cameras_path", os.path.join(current_folder, "..", "data", "h36m", "metadata.xml"), "File with h36m metadata, including cameras")
+    tf.app.flags.DEFINE_string("data_dir", os.path.join(current_folder, "..", "data", "h36m"), "Data directory")
+    tf.app.flags.DEFINE_string("train_dir", os.path.join(model_folder, "experiments"), "Training directory.")
+    
+    # Train or load
+    tf.app.flags.DEFINE_boolean("sample", False, "Set to True for sampling.")
+    tf.app.flags.DEFINE_boolean("use_cpu", False, "Whether to use the CPU")
+    tf.app.flags.DEFINE_integer("load", 0, "Try to load a previous checkpoint.") # 2437100 71600
+    
+    # Misc
+    tf.app.flags.DEFINE_boolean("use_fp16", False, "Train using fp16 instead of fp32.")
+    
+    global FLAGS
+    FLAGS = tf.app.flags.FLAGS
 
-# Architecture
-tf.app.flags.DEFINE_integer("linear_size", 1024, "Size of each model layer.")
-tf.app.flags.DEFINE_integer("num_layers", 2, "Number of layers in the model.")
-tf.app.flags.DEFINE_boolean("residual", False, "Whether to add a residual connection every 2 layers")
-
-# Evaluation
-tf.app.flags.DEFINE_boolean("procrustes", False, "Apply procrustes analysis at test time")
-tf.app.flags.DEFINE_boolean("evaluateActionWise", False, "The dataset to use either h36m or heva")
-
-# Directories
-tf.app.flags.DEFINE_string("cameras_path","data/h36m/metadata.xml", "File with h36m metadata, including cameras")
-tf.app.flags.DEFINE_string("data_dir",   "data/h36m/", "Data directory")
-tf.app.flags.DEFINE_string("train_dir", "experiments", "Training directory.")
-
-# Train or load
-tf.app.flags.DEFINE_boolean("sample", False, "Set to True for sampling.")
-tf.app.flags.DEFINE_boolean("use_cpu", False, "Whether to use the CPU")
-tf.app.flags.DEFINE_integer("load", 0, "Try to load a previous checkpoint.")
-
-# Misc
-tf.app.flags.DEFINE_boolean("use_fp16", False, "Train using fp16 instead of fp32.")
-
-FLAGS = tf.app.flags.FLAGS
-
-train_dir = os.path.join( FLAGS.train_dir,
-  FLAGS.action,
-  'dropout_{0}'.format(FLAGS.dropout),
-  'epochs_{0}'.format(FLAGS.epochs) if FLAGS.epochs > 0 else '',
-  'lr_{0}'.format(FLAGS.learning_rate),
-  'residual' if FLAGS.residual else 'not_residual',
-  'depth_{0}'.format(FLAGS.num_layers),
-  'linear_size{0}'.format(FLAGS.linear_size),
-  'batch_size_{0}'.format(FLAGS.batch_size),
-  'procrustes' if FLAGS.procrustes else 'no_procrustes',
-  'maxnorm' if FLAGS.max_norm else 'no_maxnorm',
-  'batch_normalization' if FLAGS.batch_norm else 'no_batch_normalization',
-  'predict_14' if FLAGS.predict_14 else 'predict_17')
-
-print( train_dir )
-summaries_dir = os.path.join( train_dir, "log" ) # Directory for TB summaries
-
-# To avoid race conditions: https://github.com/tensorflow/tensorflow/issues/7448
-os.system('mkdir -p {}'.format(summaries_dir))
 
 def create_model( session, actions, batch_size ):
   """
@@ -85,6 +79,24 @@ def create_model( session, actions, batch_size ):
     ValueError if asked to load a model, but the checkpoint specified by
     FLAGS.load cannot be found.
   """
+  
+  train_dir = os.path.join( FLAGS.train_dir, config.MODEL_NAME,
+    'dropout_{0}'.format(FLAGS.dropout),
+    'epochs_{0}'.format(FLAGS.epochs) if FLAGS.epochs > 0 else '',
+    'lr_{0}'.format(FLAGS.learning_rate),
+    'residual' if FLAGS.residual else 'not_residual',
+    'depth_{0}'.format(FLAGS.num_layers),
+    'linear_size{0}'.format(FLAGS.linear_size),
+    'batch_size_{0}'.format(FLAGS.batch_size),
+    'procrustes' if FLAGS.procrustes else 'no_procrustes',
+    'maxnorm' if FLAGS.max_norm else 'no_maxnorm',
+    'batch_normalization' if FLAGS.batch_norm else 'no_batch_normalization',
+    'predict_14' if FLAGS.predict_14 else 'predict_17')
+    
+  summaries_dir = os.path.join( train_dir, "log" ) # Directory for TB summaries
+
+  # To avoid race conditions: https://github.com/tensorflow/tensorflow/issues/7448
+  os.system('mkdir -p {}'.format(summaries_dir))
 
   model = linear_model.LinearModel(
       FLAGS.linear_size,
@@ -98,15 +110,23 @@ def create_model( session, actions, batch_size ):
       FLAGS.predict_14,
       dtype=tf.float16 if FLAGS.use_fp16 else tf.float32)
 
-  if FLAGS.load <= 0:
+  print("train_dir", train_dir )
+
+  if FLAGS.load == 0:
     # Create a new model from scratch
     print("Creating model with fresh parameters.")
     session.run( tf.compat.v1.global_variables_initializer() )
-    return model
-
+    return model, train_dir
+  
+  elif FLAGS.load == -1:
+    print("Loading model from the latest checkpoint.")
+    model_checkpoint_path = tf.train.latest_checkpoint(train_dir, latest_filename="checkpoint")
+    model.saver.restore( session, model_checkpoint_path )
+                         
+    return model, train_dir
+  
   # Load a previously saved model
   ckpt = tf.train.get_checkpoint_state( train_dir, latest_filename="checkpoint")
-  print( "train_dir", train_dir )
 
   if ckpt and ckpt.model_checkpoint_path:
     # Check if the specific checkpoint exists
@@ -120,14 +140,16 @@ def create_model( session, actions, batch_size ):
 
     print("Loading model {0}".format( ckpt_name ))
     model.saver.restore( session, ckpt.model_checkpoint_path )
-    return model
-  else:
-    print("Could not find checkpoint. Aborting.")
-    raise( ValueError, "Checkpoint {0} does not seem to exist".format( ckpt.model_checkpoint_path ) )
+    return model, train_dir
 
-  return model
+  print("Could not find checkpoint. Aborting.")
+  raise( ValueError, "Checkpoint {0} does not seem to exist".format( ckpt.model_checkpoint_path ) )
+
 
 def train():
+  # always train from scratch  
+  FLAGS.load = 0
+    
   """Train a linear model for 3d pose estimation"""
 
   actions = data_utils.define_actions( FLAGS.action )
@@ -137,7 +159,11 @@ def train():
   # Load camera parameters
   SUBJECT_IDS = [1,5,6,7,8,9,11]
   this_file = os.path.dirname(os.path.realpath(__file__))
-  rcams = cameras.load_cameras(os.path.join(this_file, "..", FLAGS.cameras_path), SUBJECT_IDS)
+  
+  if (FLAGS.camera_frame):
+    rcams = cameras.load_cameras(os.path.join(this_file, "..", FLAGS.cameras_path), SUBJECT_IDS)
+  else :
+    rcams = {}
 
   # Load 3d data and load (or create) 2d projections
   train_set_3d, test_set_3d, data_mean_3d, data_std_3d, dim_to_ignore_3d, dim_to_use_3d, train_root_positions, test_root_positions = data_utils.read_3d_data(
@@ -158,7 +184,7 @@ def train():
 
     # === Create the model ===
     print("Creating %d bi-layers of %d units." % (FLAGS.num_layers, FLAGS.linear_size))
-    model = create_model( sess, actions, FLAGS.batch_size )
+    model, train_dir = create_model( sess, actions, FLAGS.batch_size )
     model.train_writer.add_graph( sess.graph )
     print("Model created")
 
@@ -322,7 +348,7 @@ def evaluate_batches( sess, model,
     loss: validation loss of the network
   """
 
-  n_joints = 17 if not(FLAGS.predict_14) else 14
+  n_joints = (config.NUM_JOINTS + 1) if not(FLAGS.predict_14) else 14
   nbatches = len( encoder_inputs )
 
   # Loop through test examples
@@ -344,7 +370,10 @@ def evaluate_batches( sess, model,
     poses3d = data_utils.unNormalizeData( poses3d, data_mean_3d, data_std_3d, dim_to_ignore_3d )
 
     # Keep only the relevant dimensions
-    dtu3d = np.hstack( (np.arange(3), dim_to_use_3d) ) if not(FLAGS.predict_14) else  dim_to_use_3d
+    root_index = config.ROOT_INDEX
+    hip_coords = [root_index*3, root_index*3+1, root_index*3+2]
+    
+    dtu3d = np.hstack( (hip_coords, dim_to_use_3d) ) if not(FLAGS.predict_14) else  dim_to_use_3d
 
     dec_out = dec_out[:, dtu3d]
     poses3d = poses3d[:, dtu3d]
@@ -386,7 +415,10 @@ def evaluate_batches( sess, model,
   return total_err, joint_err, step_time, loss
 
 
-def sample():
+def sample(visualization=True):
+  # always load the latest model  
+  FLAGS.load = -1
+    
   """Get samples from a model and visualize them"""
 
   actions = data_utils.define_actions( FLAGS.action )
@@ -394,21 +426,39 @@ def sample():
   # Load camera parameters
   SUBJECT_IDS = [1,5,6,7,8,9,11]
   this_file = os.path.dirname(os.path.realpath(__file__))
-  rcams = cameras.load_cameras(os.path.join(this_file, "..", FLAGS.cameras_path), SUBJECT_IDS)
+  
+  if (FLAGS.camera_frame):
+    rcams = cameras.load_cameras(os.path.join(this_file, "..", FLAGS.cameras_path), SUBJECT_IDS)
+  else :
+    rcams = {}
 
   # Load 3d data and load (or create) 2d projections
   train_set_3d, test_set_3d, data_mean_3d, data_std_3d, dim_to_ignore_3d, dim_to_use_3d, train_root_positions, test_root_positions = data_utils.read_3d_data(
     actions, FLAGS.data_dir, FLAGS.camera_frame, rcams, FLAGS.predict_14 )
 
-  train_set_2d, test_set_2d, data_mean_2d, data_std_2d, dim_to_ignore_2d, dim_to_use_2d = data_utils.create_2d_data( actions, FLAGS.data_dir, rcams )
+  train_set_2d, test_set_2d, data_mean_2d, data_std_2d, dim_to_ignore_2d, dim_to_use_2d = data_utils.create_2d_data( actions, FLAGS.data_dir, rcams)
   print( "done reading and normalizing data." )
+
+  results_3d = OrderedDict()
+  
+  if (config.MODEL_NAME.find("_inf_") == -1):
+    normalization_directory = os.path.join(model_folder, "normalizations", config.MODEL_NAME)  
+      
+    if not os.path.exists(normalization_directory):
+      os.mkdir(normalization_directory)  
+      
+      np.save(os.path.join(normalization_directory, "data_mean_3d.npy"), data_mean_3d)
+      np.save(os.path.join(normalization_directory, "data_mean_2d.npy"), data_mean_2d)
+      np.save(os.path.join(normalization_directory, "data_std_3d.npy"), data_std_3d)
+      np.save(os.path.join(normalization_directory, "data_std_2d.npy"), data_std_2d)
+   
 
   device_count = {"GPU": 0} if FLAGS.use_cpu else {"GPU": 1}
   with tf.compat.v1.Session(config=tf.ConfigProto( device_count = device_count )) as sess:
     # === Create the model ===
     print("Creating %d layers of %d units." % (FLAGS.num_layers, FLAGS.linear_size))
     batch_size = 128
-    model = create_model(sess, actions, batch_size)
+    model, _ = create_model(sess, actions, batch_size)
     print("Model loaded")
 
     for key2d in test_set_2d.keys():
@@ -417,7 +467,7 @@ def sample():
       print( "Subject: {}, action: {}, fname: {}".format(subj, b, fname) )
 
       # keys should be the same if 3d is in camera coordinates
-      key3d = key2d if FLAGS.camera_frame else (subj, b, '{0}.h5'.format(fname.split('.')[0]))
+      key3d = key2d if FLAGS.camera_frame else (subj, b, '{0}.cdf'.format(fname.split('.')[0]))
       # key3d = (subj, b, fname[:-3]) if (fname.endswith('-sh')) and FLAGS.camera_frame else key3d
 
       enc_in  = test_set_2d[ key2d ]
@@ -427,8 +477,8 @@ def sample():
       assert n2d == n3d
 
       # Split into about-same-size batches
-      enc_in   = np.array_split( enc_in,  n2d // batch_size )
-      dec_out  = np.array_split( dec_out, n3d // batch_size )
+      enc_in   = np.array_split( enc_in,  n2d // batch_size ) if n2d > batch_size else [enc_in]
+      dec_out  = np.array_split( dec_out, n3d // batch_size ) if n3d > batch_size else [dec_out]
       all_poses_3d = []
 
       for bidx in range( len(enc_in) ):
@@ -446,13 +496,23 @@ def sample():
       # Put all the poses together
       enc_in, dec_out, poses3d = map( np.vstack, [enc_in, dec_out, all_poses_3d] )
 
+      # if key3d == (9, 'Directions', 'Directions.54138969.h5'):
+      #   print("unnormalized")
+      #   print(dec_out[0][24:27])
+
       # Convert back to world coordinates
       if FLAGS.camera_frame:
-        N_CAMERAS = 4
+        N_CAMERAS = NUM_CAMERAS
         N_JOINTS_H36M = 32
 
         # Add global position back
         dec_out = dec_out + np.tile( test_root_positions[ key3d ], [1,N_JOINTS_H36M] )
+        
+        # if key3d == (9, 'Directions', 'Directions.54138969.h5'):
+        #   print("unshifted")
+        #   print(dec_out[0][24:27])
+        
+        poses3d = poses3d + np.tile( test_root_positions[ key3d ], [1, N_JOINTS_H36M] )
 
         # Load the appropriate camera
         subj, _, sname = key3d
@@ -468,57 +528,164 @@ def sample():
           data_3d_worldframe = cameras.camera_to_world_frame(data_3d_camframe.reshape((-1, 3)), R, T)
           data_3d_worldframe = data_3d_worldframe.reshape((-1, N_JOINTS_H36M*3))
           # subtract root translation
-          return data_3d_worldframe - np.tile( data_3d_worldframe[:,:3], (1,N_JOINTS_H36M) )
+          return data_3d_worldframe # - np.tile( data_3d_worldframe[:,:3], (1,N_JOINTS_H36M) )
 
         # Apply inverse rotation and translation
         dec_out = cam2world_centered(dec_out)
         poses3d = cam2world_centered(poses3d)
+        
+        # if key3d == (9, 'Directions', 'Directions.54138969.h5'):
+        #     print("in world coordinates")
+        #     print (dec_out[0][24:27])
+        #     print (poses3d[0][24:27])
+        
+      else :
+        N_JOINTS_H36M = 32
+        
+        poses3d = poses3d + np.tile( test_root_positions[ key3d ], [1, N_JOINTS_H36M] )
+        dec_out = dec_out + np.tile( test_root_positions[ key3d ], [1, N_JOINTS_H36M] )
+        
+      results_3d[key3d] = {
+        "true": dec_out,
+        "pred": poses3d    
+      }
 
   # Grab a random batch to visualize
   enc_in, dec_out, poses3d = map( np.vstack, [enc_in, dec_out, poses3d] )
-  idx = np.random.permutation( enc_in.shape[0] )
+  enc_in = delete_depth_coordinate(dec_out)
+  
+  # idx = np.random.permutation( enc_in.shape[0] )
+  idx = np.arange(enc_in.shape[0])
   enc_in, dec_out, poses3d = enc_in[idx, :], dec_out[idx, :], poses3d[idx, :]
 
-  # Visualize random samples
-  import matplotlib.gridspec as gridspec
-
-  # 1080p	= 1,920 x 1,080
-  fig = plt.figure( figsize=(19.2, 10.8) )
-
-  gs1 = gridspec.GridSpec(5, 9) # 5 rows, 9 columns
-  gs1.update(wspace=-0.00, hspace=0.05) # set the spacing between axes.
-  plt.axis('off')
-
-  subplot_idx, exidx = 1, 1
-  nsamples = 15
-  for i in np.arange( nsamples ):
-
-    # Plot 2d pose
-    ax1 = plt.subplot(gs1[subplot_idx-1])
-    p2d = enc_in[exidx,:]
-    viz.show2Dpose( p2d, ax1 )
-    ax1.invert_yaxis()
-
-    # Plot 3d gt
-    ax2 = plt.subplot(gs1[subplot_idx], projection='3d')
-    p3d = dec_out[exidx,:]
-    viz.show3Dpose( p3d, ax2 )
-
-    # Plot 3d predictions
-    ax3 = plt.subplot(gs1[subplot_idx+1], projection='3d')
-    p3d = poses3d[exidx,:]
-    viz.show3Dpose( p3d, ax3, lcolor="#9b59b6", rcolor="#2ecc71" )
-
-    exidx = exidx + 1
-    subplot_idx = subplot_idx + 3
+  if (visualization):
+      # Visualize random samples
+      import matplotlib.gridspec as gridspec
+    
+      # 1080p    = 1,920 x 1,080
+      fig = plt.figure( figsize=(19.2, 10.8) )
+    
+      gs1 = gridspec.GridSpec(5, 9) # 5 rows, 9 columns
+      gs1.update(wspace=-0.00, hspace=0.05) # set the spacing between axes.
+      plt.axis('off')
+    
+      subplot_idx, exidx = 1, 0
+      nsamples = min(15, n2d)
+      for i in np.arange( nsamples ):
+    
+        # Plot 2d pose
+        ax1 = plt.subplot(gs1[subplot_idx-1])
+        p2d = enc_in[exidx,:]
+        viz.show2Dpose( p2d, ax1, add_labels=False)
+        # ax1.invert_yaxis()
+        
+        # Plot 3d gt
+        ax2 = plt.subplot(gs1[subplot_idx], projection='3d')
+        p3d = dec_out[exidx,:]
+        viz.show3Dpose( p3d, ax2, add_labels=False)
+    
+        # Plot 3d predictions
+        ax3 = plt.subplot(gs1[subplot_idx+1], projection='3d')
+        p3d = poses3d[exidx,:]
+        viz.show3Dpose( p3d, ax3, lcolor="#9b59b6", rcolor="#2ecc71", add_labels=False)
+    
+        exidx = exidx + 1
+        subplot_idx = subplot_idx + 3
 
   plt.show()
+  
+  return results_3d, dim_to_use_3d
 
-def main(_):
-  if FLAGS.sample:
-    sample()
-  else:
-    train()
+
+def calc_error(results_3d, dims_to_use, use_original_metrics=True):
+  # original code includes root (hip) joint where the difference is zero...  
+  root_index = config.ROOT_INDEX
+  hip_coords = [root_index*3, root_index*3+1, root_index*3+2]
+  dims_to_use = np.insert(dims_to_use, root_index*3, hip_coords) 
+    
+  errors_by_action = {}
+  results_by_action = {}
+  
+  # merge results of different subjects (and cameras)
+  for key3d, data in results_3d.items():
+    (_, cleaned_action, _) = key3d  
+    
+    results = results_by_action.setdefault(cleaned_action, {})
+    
+    if (results == {}): # avoid side-effects to results_3d by copying
+        results = copy.deepcopy(data)
+        
+    else :
+        results["true"] = np.concatenate([results["true"], data["true"]], axis=0)
+        results["pred"] = np.concatenate([results["pred"], data["pred"]], axis=0)
+        
+    results_by_action[cleaned_action] = results
+    
+  for action, data in results_by_action.items():    
+    diff = data["true"][:, dims_to_use] - data["pred"][:, dims_to_use]
+    squared_diff = np.square(diff)
+    
+    if use_original_metrics:
+      # last, incomplete batch will be ignored
+      batch_size = FLAGS.batch_size
+      num_batches = squared_diff.shape[0] // batch_size
+      squared_diff = squared_diff[:num_batches*batch_size, :]
+    
+    squared_diff_by_coords = squared_diff.reshape(-1, 3)
+    squared_diff_by_coords_sum = np.sum(squared_diff_by_coords, axis=1)
+    sqrt_err = np.sqrt(squared_diff_by_coords_sum)
+    mean_sqrt_err = np.average(sqrt_err)
+    
+    errors = errors_by_action.setdefault(action, [])
+    errors.append(mean_sqrt_err)
+
+  
+  for action, errors in errors_by_action.items():
+    print(action, round(np.average(errors), 2))  
+  
+  all_errors = list(errors_by_action.values())
+  print("Average", round(np.average(all_errors), 2))
+
+
+
+def eval():
+  results_3d, dim_to_use_3d = sample(visualization=False)
+  calc_error(results_3d, dim_to_use_3d)
+  store_results(results_3d, dim_to_use_3d)
+  
+"""  
+Configurations: 
+
+* "h36m_16j", "h36m_16j_debug", "h36m_16j_cam", 
+* "h36m_16j_inf_narrat3d_val", "h36m_16j_cam_inf_narrat3d_val"
+* "narrat3d_16j", "narrat3d_16j_cam",
+* "narrat3d_21j", "narrat3d_21j_cam", "narrat3d_21j_inf_narrat3d_test"
+"""
+def main(_):    
+  load_config("narrat3d_21j_inf_narrat3d_test")  
+  initialize_flags()
+  data_utils.initialize_methods()
+  
+  if (not config.USE_ORIGINAL_VALIDATION_DATA and not config.USE_OWN_TEST_DATA):
+    data_utils_mod.initialize_trainval_data()
+  
+  # train()
+  eval()
+
 
 if __name__ == "__main__":
+  global model_folder
+  
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--model_folder", default=current_folder)
+  parser.add_argument("--out_folder", default=r"E:\CNN\implicit_functions\characters\output")
+  parser.add_argument("--sub_folders", default="")
+  args = parser.parse_args()
+
+  model_folder = args.model_folder
+  out_folder = args.out_folder
+  sub_folders = args.sub_folders
+  set_model_folder(model_folder)
+  set_test_folders(out_folder, sub_folders)
+    
   tf.compat.v1.app.run()

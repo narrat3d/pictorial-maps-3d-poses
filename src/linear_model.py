@@ -6,6 +6,7 @@ import os
 import numpy as np
 import tensorflow as tf
 from tensorflow.python.ops import variable_scope as vs
+from config import config
 
 
 def kaiming(shape, dtype, partition_info=None):
@@ -55,7 +56,7 @@ class LinearModel(object):
     # hourglass detections). We settled with 16 joints in 2d just to make models
     # compatible (e.g. you can train on ground truth 2d and test on SH detections).
     # This does not seem to have an effect on prediction performance.
-    self.HUMAN_2D_SIZE = 16 * 2
+    self.HUMAN_2D_SIZE = config.NUM_JOINTS * 2
 
     # In 3d all the predictions are zero-centered around the root (hip) joint, so
     # we actually predict only 16 joints. The error is still computed over 17 joints,
@@ -63,7 +64,7 @@ class LinearModel(object):
     # hip to account for!
     # There is also an option to predict only 14 joints, which makes our results
     # directly comparable to those in https://arxiv.org/pdf/1611.09010.pdf
-    self.HUMAN_3D_SIZE = 14 * 3 if predict_14 else 16 * 3
+    self.HUMAN_3D_SIZE = 14 * 3 if predict_14 else config.NUM_JOINTS * 3
 
     self.input_size  = self.HUMAN_2D_SIZE
     self.output_size = self.HUMAN_3D_SIZE
@@ -142,7 +143,7 @@ class LinearModel(object):
     self.learning_rate_summary = tf.compat.v1.summary.scalar('learning_rate/learning_rate', self.learning_rate)
 
     # To save the model
-    self.saver = tf.compat.v1.train.Saver( tf.compat.v1.global_variables(), max_to_keep=10 )
+    self.saver = tf.compat.v1.train.Saver( tf.compat.v1.global_variables(), max_to_keep=10, save_relative_paths=True )
 
 
   def two_linear( self, xin, linear_size, residual, dropout_keep_prob, max_norm, batch_norm, dtype, idx ):
@@ -266,7 +267,7 @@ class LinearModel(object):
     for key2d in data_x.keys():
       (subj, b, fname) = key2d
       # keys should be the same if 3d is in camera coordinates
-      key3d = key2d if (camera_frame) else (subj, b, '{0}.h5'.format(fname.split('.')[0]))
+      key3d = key2d if (camera_frame) else (subj, b, '{0}.cdf'.format(fname.split('.')[0]))
       key3d = (subj, b, fname[:-3]) if fname.endswith('-sh') and camera_frame else key3d
 
       n2d, _ = data_x[ key2d ].shape

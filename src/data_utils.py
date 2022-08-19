@@ -8,6 +8,10 @@ import cdflib
 import numpy as np
 
 import cameras
+from config import config, NUM_CAMERAS
+import data_utils_mod
+from data_utils_mod import load_mean_and_std
+import viz_mod
 
 # Human3.6m IDs for training and testing
 TRAIN_SUBJECTS = [1,5,6,7,8]
@@ -52,6 +56,8 @@ SH_NAMES[13] = 'LShoulder'
 SH_NAMES[14] = 'LElbow'
 SH_NAMES[15] = 'LWrist'
 
+from pathlib import Path
+
 def load_data( bpath, subjects, actions, dim=3 ):
   """Loads 2d ground truth from disk, and puts it in an easy-to-acess dictionary
 
@@ -71,16 +77,17 @@ def load_data( bpath, subjects, actions, dim=3 ):
     raise ValueError('dim must be 2 or 3')
 
   data = {}
-
+  
   for subj in subjects:
     for action in actions:
 
       print('Reading subject {0}, action {1}'.format(subj, action))
 
-      dpath = os.path.join( bpath, 'S{0}'.format(subj), 'MyPoseFeatures/D{0}_Positions'.format(dim), '{0}*.cdf'.format(action) )
+      dpath = Path(os.path.join(bpath, 'S{0}'.format(subj), 'MyPoseFeatures/D{0}_Positions'.format(dim)))
       print( dpath )
 
-      fnames = glob.glob( dpath )
+      fnames = dpath.glob( '{0}*.cdf'.format(action) )
+      fnames = [str(pp) for pp in fnames]
 
       loaded_seqs = 0
       for fname in fnames:
@@ -100,7 +107,9 @@ def load_data( bpath, subjects, actions, dim=3 ):
           poses = cdf_file.varget("Pose").squeeze()
           cdf_file.close()
 
-          data[ (subj, action, seqname) ] = poses
+          # show_animated_3d_poses(poses)  
+
+          data[ (subj, action, seqname) ] = poses          
 
       if dim == 2:
         assert loaded_seqs == 8, "Expecting 8 sequences, found {0} instead".format( loaded_seqs )
@@ -126,8 +135,11 @@ def normalization_stats(complete_data, dim, predict_14=False ):
   if not dim in [2,3]:
     raise ValueError('dim must be 2 or 3')
 
-  data_mean = np.mean(complete_data, axis=0)
-  data_std  =  np.std(complete_data, axis=0)
+  if (config.USE_ORIGINAL_DATA and config.USE_ORIGINAL_VALIDATION_DATA) or (not config.USE_ORIGINAL_DATA and config.USE_ORIGINAL_JOINTS):
+    data_mean = np.mean(complete_data, axis=0)
+    data_std  =  np.std(complete_data, axis=0)
+  else :
+    data_mean, data_std = load_mean_and_std(dim)
 
   # Encodes which 17 (or 14) 2d-3d pairs we are predicting
   dimensions_to_ignore = []
@@ -147,7 +159,7 @@ def normalization_stats(complete_data, dim, predict_14=False ):
   return data_mean, data_std, dimensions_to_ignore, dimensions_to_use
 
 
-def transform_world_to_camera(poses_set, cams, ncams=4 ):
+def transform_world_to_camera(poses_set, cams, ncams=NUM_CAMERAS ):
     """Project 3d poses from world coordinate to camera coordinate system
 
     Args
@@ -250,7 +262,7 @@ def define_actions( action ):
   return [action]
 
 
-def project_to_cameras( poses_set, cams, ncams=4 ):
+def project_to_cameras( poses_set, cams, ncams=NUM_CAMERAS ):
   """
   Project 3d poses using camera parameters
 
@@ -278,7 +290,7 @@ def project_to_cameras( poses_set, cams, ncams=4 ):
   return t2d
 
 
-def create_2d_data( actions, data_dir, rcams ):
+def create_2d_data( actions, data_dir, rcams):
   """Creates 2d poses by projecting 3d poses with the corresponding camera
   parameters. Also normalizes the 2d poses
 
@@ -296,16 +308,17 @@ def create_2d_data( actions, data_dir, rcams ):
   """
 
   # Load 3d data
-  train_set = load_data( data_dir, TRAIN_SUBJECTS, actions, dim=3 )
-  test_set  = load_data( data_dir, TEST_SUBJECTS,  actions, dim=3 )
+  train_set = load_data_method( data_dir, TRAIN_SUBJECTS, actions, dim=3 )
+  test_set  = load_data_method( data_dir, TEST_SUBJECTS,  actions, dim=3 )
 
   # Create 2d data by projecting with camera parameters
-  train_set = project_to_cameras( train_set, rcams )
-  test_set  = project_to_cameras( test_set, rcams )
+  train_set = project_to_cameras_method( train_set, rcams )
+  test_set  = project_to_cameras_method( test_set, rcams )
 
   # Compute normalization statistics.
   complete_train = copy.deepcopy( np.vstack( list(train_set.values()) ))
-  data_mean, data_std, dim_to_ignore, dim_to_use = normalization_stats( complete_train, dim=2 )
+  
+  data_mean, data_std, dim_to_ignore, dim_to_use = normalization_stats_method( complete_train, dim=2 ) 
 
   # Divide every dimension independently
   train_set = normalize_data( train_set, data_mean, data_std, dim_to_use )
@@ -334,24 +347,38 @@ def read_3d_data( actions, data_dir, camera_frame, rcams, predict_14=False ):
     test_root_positions: dictionary with the 3d positions of the root in test
   """
   # Load 3d data
-  train_set = load_data( data_dir, TRAIN_SUBJECTS, actions, dim=3 )
-  test_set  = load_data( data_dir, TEST_SUBJECTS,  actions, dim=3 )
+  train_set = load_data_method( data_dir, TRAIN_SUBJECTS, actions, dim=3 )
+  test_set  = load_data_method( data_dir, TEST_SUBJECTS,  actions, dim=3 )
+
+  # viz_mod.show_3d_pose(train_set)
+  # print("original")
+  # print(test_set[(9, 'Directions', 'Directions.cdf')][0][24:27])
 
   if camera_frame:
     train_set = transform_world_to_camera( train_set, rcams )
     test_set  = transform_world_to_camera( test_set, rcams )
+  
+  # print("in camera space")
+  # print(test_set[(9, 'Directions', 'Directions.54138969.h5')][0][24:27])
 
   # Apply 3d post-processing (centering around root)
-  train_set, train_root_positions = postprocess_3d( train_set )
-  test_set,  test_root_positions  = postprocess_3d( test_set )
+  train_set, train_root_positions = postprocess_3d_method( train_set )
+  test_set,  test_root_positions  = postprocess_3d_method( test_set )
+  
+  # print("shifted")
+  # print(test_set[(9, 'Directions', 'Directions.54138969.h5')][0][24:27])
 
   # Compute normalization statistics
   complete_train = copy.deepcopy( np.vstack( list(train_set.values()) ))
-  data_mean, data_std, dim_to_ignore, dim_to_use = normalization_stats( complete_train, dim=3, predict_14=predict_14 )
-
+  
+  data_mean, data_std, dim_to_ignore, dim_to_use = normalization_stats_method( complete_train, dim=3, predict_14=predict_14 )
+  
   # Divide every dimension independently
   train_set = normalize_data( train_set, data_mean, data_std, dim_to_use )
   test_set  = normalize_data( test_set,  data_mean, data_std, dim_to_use )
+  
+  # print("normalized")
+  # print(test_set[(9, 'Directions', 'Directions.54138969.h5')][0][24:27])
 
   return train_set, test_set, data_mean, data_std, dim_to_ignore, dim_to_use, train_root_positions, test_root_positions
 
@@ -376,3 +403,57 @@ def postprocess_3d( poses_set ):
     poses_set[k] = poses
 
   return poses_set, root_positions
+
+
+def initialize_methods():
+    global load_data_method
+    global postprocess_3d_method
+    global normalization_stats_method
+    global project_to_cameras_method
+    
+    if config.USE_ORIGINAL_VALIDATION_DATA:
+        load_data_method = load_data
+        postprocess_3d_method = postprocess_3d
+        normalization_stats_method = normalization_stats
+    else :
+        load_data_method = data_utils_mod.load_data
+     
+        if config.USE_ORIGINAL_JOINTS:
+            postprocess_3d_method = postprocess_3d
+            normalization_stats_method = normalization_stats
+        else :
+            postprocess_3d_method = data_utils_mod.postprocess_3d
+            normalization_stats_method = data_utils_mod.normalization_stats
+    
+    if config.CAMERA_FRAME:
+        project_to_cameras_method = project_to_cameras
+    else :
+        project_to_cameras_method = data_utils_mod.project_to_cameras
+    
+if __name__ == '__main__':
+    subjects = [9]
+    N_CAMERAS = 4
+    N_JOINTS_H36M = 32
+    rcams = cameras.load_cameras("../data/h36m/metadata.xml", subjects)
+    data = load_data("data/h36m", subjects, ["Walking"], 3)
+    data_transformed = transform_world_to_camera( data, rcams )
+    
+    print(data_transformed[(9, 'Walking', 'Walking.54138969.h5')])
+    
+    data_vstacked = copy.deepcopy( np.vstack( list(data_transformed.values()) ))
+    data_mean, data_std, dimensions_to_ignore, dimensions_to_use = normalization_stats(data_vstacked, 3)
+    normalized_data = normalize_data(data_transformed, data_mean, data_std, dimensions_to_use)
+    unnormalized_data = unNormalizeData(normalized_data[(9, 'Walking', 'Walking.54138969.h5')], data_mean, data_std, dimensions_to_ignore)
+    
+    print(unnormalized_data)
+    
+    for key3d, data_3d_camframe in data_transformed.items():
+        subj, _, sname = key3d
+        cname = sname.split('.')[1] # <-- camera name
+        scams = {(subj,c+1): rcams[(subj,c+1)] for c in range(N_CAMERAS)} # cams of this subject
+        scam_idx = [scams[(subj,c+1)][-1] for c in range(N_CAMERAS)].index( cname ) # index of camera used
+        the_cam  = scams[(subj, scam_idx+1)] # <-- the camera used
+        R, T, f, c, k, p, name = the_cam
+
+        data_3d_worldframe = cameras.camera_to_world_frame(data_3d_camframe.reshape((-1, 3)), R, T)
+        data_3d_worldframe = data_3d_worldframe.reshape((-1, N_JOINTS_H36M*3))

@@ -3,6 +3,7 @@
 from xml.dom import minidom
 
 import numpy as np
+from config import NUM_CAMERAS
 
 CAMERA_ID_TO_NAME = {
   1: "54138969",
@@ -168,7 +169,7 @@ def load_cameras(bpath, subjects=[1,5,6,7,8,9,11]):
   assert len(w0) == 300
 
   for s in subjects:
-    for c in range(4): # There are 4 cameras in human3.6m
+    for c in range(NUM_CAMERAS): # There are 4 cameras in human3.6m
       rcams[(s, c+1)] = load_camera_params(w0, s, c+1)
 
   return rcams
