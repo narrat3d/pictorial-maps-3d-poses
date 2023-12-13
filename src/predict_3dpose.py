@@ -624,7 +624,7 @@ def calc_error(results_3d, dims_to_use, use_original_metrics=True):
   for action, data in results_by_action.items():    
     diff = data["true"][:, dims_to_use] - data["pred"][:, dims_to_use]
     squared_diff = np.square(diff)
-    
+        
     if use_original_metrics:
       # last, incomplete batch will be ignored
       batch_size = FLAGS.batch_size
@@ -636,15 +636,21 @@ def calc_error(results_3d, dims_to_use, use_original_metrics=True):
     sqrt_err = np.sqrt(squared_diff_by_coords_sum)
     mean_sqrt_err = np.average(sqrt_err)
     
-    errors = errors_by_action.setdefault(action, [])
-    errors.append(mean_sqrt_err)
-
+    squared_diff_by_joint = squared_diff.reshape((-1,config.NUM_JOINTS_WITH_ROOT, 3))
+    squared_diff_by_joint_sum_sqrt = np.sqrt(np.sum(squared_diff_by_joint, axis=2))
+    pck_150mm = np.sum((squared_diff_by_joint_sum_sqrt < 150).astype(int), axis=1) 
+    pck_150mm_percent = np.average(pck_150mm / config.NUM_JOINTS_WITH_ROOT * 100)
+    
+    errors = errors_by_action.setdefault(action, {"rmse": [], "pck": []})
+    errors["rmse"].append(mean_sqrt_err)
+    errors["pck"].append(pck_150mm_percent)
   
   for action, errors in errors_by_action.items():
-    print(action, round(np.average(errors), 2))  
+    print(action, round(np.average(errors["rmse"]), 2), round(np.average(errors["pck"]), 2))  
   
-  all_errors = list(errors_by_action.values())
-  print("Average", round(np.average(all_errors), 2))
+  rmse_errors = list(map(lambda errors: errors["rmse"], errors_by_action.values()))
+  pck_errors = list(map(lambda errors: errors["pck"], errors_by_action.values()))
+  print("Average", round(np.average(rmse_errors), 2), round(np.average(pck_errors), 2))
 
 
 
@@ -662,7 +668,7 @@ Configurations:
 * "narrat3d_21j", "narrat3d_21j_cam", "narrat3d_21j_inf_narrat3d_test"
 """
 def main(_):    
-  load_config("narrat3d_21j_inf_narrat3d_test")  
+  load_config("h36m_16j")  
   initialize_flags()
   data_utils.initialize_methods()
   
