@@ -4,6 +4,7 @@ helper methods for debugging data_utils
 from config import H36M_NAMES
 import matplotlib.pyplot as plt
 import numpy as np
+from mpl_toolkits.mplot3d import Axes3D
 
 def show_2d_pose(test_set):
     import viz
