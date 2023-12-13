@@ -187,8 +187,6 @@ def store_results(results_3d, dims_to_use):
             else :
                 skeleton_path = file_path.replace("2d.json", "front.json")
             
-            print (skeleton_path)
-            
             with open(skeleton_path, "w") as file:
                 json.dump(skeleton, file)
             
