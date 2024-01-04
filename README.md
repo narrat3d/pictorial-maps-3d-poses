@@ -1,6 +1,6 @@
 # 3D pose estimation for human figures from pictorial maps
 
-This is a fork from https://github.com/una-dinosauria/3d-pose-baseline
+This is a fork from https://github.com/una-dinosauria/3d-pose-baseline (MIT License, Copyright by Julieta Martinez, Rayat Hossain, Javier Romero)
 
 ## Usage
 
@@ -33,3 +33,5 @@ inf_narrat3d_test = inference with our own test data
 * You cannot eval() directly after train() in predict_3dpose.py. You have to restart the module and comment either train() or eval().
 * It is normal that a folder "-p" will be created besides the "experiments" and "normalizations" folder.
 * For the test data, nan values are displayed for the metrics since there is no reference data.
+
+© 2022-2023 ETH Zurich, Raimund Schnürer
