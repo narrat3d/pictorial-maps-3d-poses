@@ -1,6 +1,8 @@
 # 3D pose estimation for human figures from pictorial maps
 
-This is a fork from https://github.com/una-dinosauria/3d-pose-baseline (MIT License, Copyright by Julieta Martinez, Rayat Hossain, Javier Romero)
+This is code for the article [Inferring Implicit 3D Representations from Human Figures on Pictorial Maps](https://doi.org/10.1080/15230406.2023.2224063). Visit the [main repository](https://github.com/narrat3d/pictorial-maps-3d-humans) and the [project website](http://narrat3d.ethz.ch/3d-humans-from-pictorial-maps/) for more information.  
+  
+It is a fork from https://github.com/una-dinosauria/3d-pose-baseline (MIT License, Copyright by Julieta Martinez, Rayat Hossain, Javier Romero).
 
 ## Usage
 
